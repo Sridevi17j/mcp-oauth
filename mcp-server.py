@@ -19,7 +19,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from datetime import datetime
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+#from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+
 
 # Load environment variables from the script's directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +34,7 @@ else:
     print(f"Warning: env file not found at {env_file}", file=sys.stderr)
 
 # Initialize FastMCP server
-mcp = FastMCP("simple-oauth-server")
+mcp = FastMCP(name="simple-oauth-server")
 
 # Global auth state
 user_access_token = None
@@ -360,4 +362,4 @@ if __name__ == "__main__":
     print("📡 Server will be available at: http://localhost:8000/mcp", file=sys.stderr)
     
     # Run with streamable HTTP transport (new standard, not deprecated SSE)
-    mcp.run(transport="streamable-http")
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
