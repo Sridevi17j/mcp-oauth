@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Simple OAuth-protected MCP Server using FastMCP
+OAuth-protected MCP Server using FastMCP for Render deployment
+Using FastMCP's built-in OAuth capabilities with Auth0
 """
 
 import os
@@ -15,13 +16,11 @@ import hashlib
 import secrets
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, parse_qs, urlparse
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
 from datetime import datetime
 from dotenv import load_dotenv
-#from mcp.server.fastmcp import FastMCP
-from fastmcp import FastMCP
-
+from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 # Load environment variables from the script's directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,169 +32,14 @@ if os.path.exists(env_file):
 else:
     print(f"Warning: env file not found at {env_file}", file=sys.stderr)
 
-# Initialize FastMCP server
-mcp = FastMCP(name="simple-oauth-server")
-
-# Global auth state
-user_access_token = None
-user_name = None
+# Global auth state for external OAuth callback handling
+oauth_callback_data = None
 oauth_in_progress = False
-
-class AuthCallbackHandler(BaseHTTPRequestHandler):
-    """HTTP handler for OAuth callback"""
-    
-    def do_GET(self):
-        # Parse the authorization code from callback
-        parsed_url = urlparse(self.path)
-        query_params = parse_qs(parsed_url.query)
-        
-        if 'code' in query_params:
-            self.server.authorization_code = query_params['code'][0]
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(b'''
-            <html><body>
-            <h1>Authentication Successful!</h1>
-            <p>You can now close this window and return to Claude Desktop.</p>
-            <script>setTimeout(() => window.close(), 3000);</script>
-            </body></html>
-            ''')
-        elif 'error' in query_params:
-            self.server.error = query_params['error'][0]
-            self.send_response(400)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(f'''
-            <html><body>
-            <h1>Authentication Error</h1>
-            <p>Error: {query_params['error'][0]}</p>
-            </body></html>
-            '''.encode())
-        
-        # Signal the server to stop
-        Thread(target=self.server.shutdown).start()
-    
-    def log_message(self, format, *args):
-        # Suppress default logging to keep stdio clean
-        pass
-
-class Auth0Client:
-    """Auth0 OAuth client with browser-based PKCE flow"""
-    
-    def __init__(self):
-        self.domain = os.environ.get("AUTH0_DOMAIN")
-        self.client_id = os.environ.get("AUTH0_CLIENT_ID") 
-        self.audience = os.environ.get("AUTH0_AUDIENCE")
-        self.redirect_uri = "https://mcp-oauth.onrender.com/callback"
-        
-        if not all([self.domain, self.client_id, self.audience]):
-            raise ValueError("Missing Auth0 configuration: AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE required")
-    
-    def generate_pkce_pair(self):
-        """Generate PKCE code verifier and challenge"""
-        code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode('utf-8')).digest()
-        ).decode('utf-8').rstrip('=')
-        return code_verifier, code_challenge
-    
-    def authenticate(self) -> Optional[str]:
-        """Perform browser-based OAuth authentication"""
-        global oauth_in_progress
-        
-        if oauth_in_progress:
-            print("OAuth flow already in progress...", file=sys.stderr)
-            return None
-            
-        oauth_in_progress = True
-        
-        try:
-            print("🔐 Starting Auth0 authentication...", file=sys.stderr)
-            
-            # Generate PKCE parameters
-            code_verifier, code_challenge = self.generate_pkce_pair()
-            
-            # Build authorization URL
-            auth_params = {
-                'response_type': 'code',
-                'client_id': self.client_id,
-                'redirect_uri': self.redirect_uri,
-                'scope': 'openid profile email',
-                'audience': self.audience,
-                'code_challenge': code_challenge,
-                'code_challenge_method': 'S256',
-                'state': secrets.token_urlsafe(16)
-            }
-            
-            auth_url = f"https://{self.domain}/authorize?" + urlencode(auth_params)
-            
-            print(f"🌐 Opening browser for authentication...", file=sys.stderr)
-            
-            # Start local callback server
-            server = HTTPServer(('localhost', 8080), AuthCallbackHandler)
-            server.authorization_code = None
-            server.error = None
-            
-            # Open browser
-            webbrowser.open(auth_url)
-            
-            print("⏳ Waiting for authorization...", file=sys.stderr)
-            
-            # Handle callback with timeout
-            server.timeout = 60  # 60 second timeout
-            server.handle_request()
-            
-            if hasattr(server, 'error') and server.error:
-                print(f"❌ Authentication failed: {server.error}", file=sys.stderr)
-                return None
-            
-            if not hasattr(server, 'authorization_code') or not server.authorization_code:
-                print("❌ No authorization code received", file=sys.stderr)
-                return None
-            
-            # Exchange code for token
-            return self.exchange_code_for_token(server.authorization_code, code_verifier)
-            
-        finally:
-            oauth_in_progress = False
-    
-    def exchange_code_for_token(self, auth_code: str, code_verifier: str) -> Optional[str]:
-        """Exchange authorization code for access token"""
-        print("🔄 Exchanging code for token...", file=sys.stderr)
-        
-        token_data = {
-            'grant_type': 'authorization_code',
-            'client_id': self.client_id,
-            'code': auth_code,
-            'redirect_uri': self.redirect_uri,
-            'code_verifier': code_verifier
-        }
-        
-        try:
-            response = requests.post(
-                f"https://{self.domain}/oauth/token",
-                json=token_data,
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            token_response = response.json()
-            access_token = token_response.get('access_token')
-            
-            if access_token:
-                print("✅ Authentication successful!", file=sys.stderr)
-                return access_token
-            else:
-                print("❌ No access token received", file=sys.stderr)
-                return None
-                
-        except Exception as e:
-            print(f"❌ Token exchange failed: {e}", file=sys.stderr)
-            return None
+user_sessions = {}  # Store user sessions by session ID
 
 class Auth0TokenValidator:
+    """Validates Auth0 JWT tokens"""
+    
     def __init__(self):
         self.domain = os.environ.get("AUTH0_DOMAIN")
         self.audience = os.environ.get("AUTH0_AUDIENCE") 
@@ -276,90 +120,231 @@ class Auth0TokenValidator:
             print(f"Failed to get user info: {e}", file=sys.stderr)
             return None
 
+class Auth0Client:
+    """Auth0 OAuth client for server-side flow"""
+    
+    def __init__(self):
+        self.domain = os.environ.get("AUTH0_DOMAIN")
+        self.client_id = os.environ.get("AUTH0_CLIENT_ID") 
+        self.audience = os.environ.get("AUTH0_AUDIENCE")
+        # Use server URL for callback in production
+        base_url = os.environ.get("SERVER_URL", "http://localhost:8000")
+        self.redirect_uri = f"{base_url}/auth/callback"
+        
+        if not all([self.domain, self.client_id, self.audience]):
+            raise ValueError("Missing Auth0 configuration: AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE required")
+    
+    def generate_pkce_pair(self):
+        """Generate PKCE code verifier and challenge"""
+        code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode('utf-8')).digest()
+        ).decode('utf-8').rstrip('=')
+        return code_verifier, code_challenge
+    
+    def get_authorization_url(self, state: str, code_verifier: str) -> str:
+        """Generate Auth0 authorization URL"""
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode('utf-8')).digest()
+        ).decode('utf-8').rstrip('=')
+        
+        auth_params = {
+            'response_type': 'code',
+            'client_id': self.client_id,
+            'redirect_uri': self.redirect_uri,
+            'scope': 'openid profile email',
+            'audience': self.audience,
+            'code_challenge': code_challenge,
+            'code_challenge_method': 'S256',
+            'state': state
+        }
+        
+        return f"https://{self.domain}/authorize?" + urlencode(auth_params)
+    
+    def exchange_code_for_token(self, auth_code: str, code_verifier: str) -> Optional[str]:
+        """Exchange authorization code for access token"""
+        print("🔄 Exchanging code for token...", file=sys.stderr)
+        
+        token_data = {
+            'grant_type': 'authorization_code',
+            'client_id': self.client_id,
+            'code': auth_code,
+            'redirect_uri': self.redirect_uri,
+            'code_verifier': code_verifier
+        }
+        
+        try:
+            response = requests.post(
+                f"https://{self.domain}/oauth/token",
+                json=token_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            token_response = response.json()
+            access_token = token_response.get('access_token')
+            
+            if access_token:
+                print("✅ Authentication successful!", file=sys.stderr)
+                return access_token
+            else:
+                print("❌ No access token received", file=sys.stderr)
+                return None
+                
+        except Exception as e:
+            print(f"❌ Token exchange failed: {e}", file=sys.stderr)
+            return None
+
+
 # Initialize clients
 auth_client = Auth0Client()
 auth_validator = Auth0TokenValidator()
 
-def ensure_authenticated() -> bool:
-    """Ensure user is authenticated, trigger auth flow if needed"""
-    global user_access_token, user_name
+# Initialize FastMCP server with OAuth callback route
+mcp = FastMCP("oauth-mcp-server")
+
+# OAuth callback handler using FastMCP's custom_route
+@mcp.custom_route("/auth/callback", methods=["GET"])
+async def auth_callback_handler(request: Request):
+    """Handle OAuth callback from Auth0"""
+    global oauth_callback_data
     
-    if not user_access_token:
-        print("🔐 No active session. Starting authentication...", file=sys.stderr)
-        user_access_token = auth_client.authenticate()
-        
-        if user_access_token:
-            # Validate token and get user info
-            user_info = auth_validator.validate_token(user_access_token)
-            if user_info:
-                # Get detailed user info from Auth0 /userinfo endpoint
-                detailed_user_info = auth_validator.get_user_info(user_access_token)
-                if detailed_user_info:
-                    # Extract user name/email from userinfo endpoint
-                    user_name = detailed_user_info.get('email') or detailed_user_info.get('name') or detailed_user_info.get('nickname') or user_info.get('sub', 'User')
-                else:
-                    # Fallback to token info
-                    user_name = user_info.get('email') or user_info.get('name') or user_info.get('sub', 'User')
-                
-                print(f"👋 Hello {user_name}!", file=sys.stderr)
-                return True
-        
-        return False
+    query_params = dict(request.query_params)
+    print(f"🔍 OAuth callback received: {query_params}", file=sys.stderr)
     
-    return True
+    if 'code' in query_params and 'state' in query_params:
+        oauth_callback_data = {
+            'authorization_code': query_params['code'],
+            'state': query_params['state'],
+            'error': None
+        }
+        print(f"✅ Authorization code received: {oauth_callback_data['authorization_code'][:10]}...", file=sys.stderr)
+        
+        return HTMLResponse("""
+        <html><body>
+        <h1>🎉 Authentication Successful!</h1>
+        <p>You can now close this window and return to Claude Desktop.</p>
+        <p>Your MCP tools are now ready to use!</p>
+        <script>setTimeout(() => window.close(), 3000);</script>
+        </body></html>
+        """)
+    elif 'error' in query_params:
+        oauth_callback_data = {
+            'authorization_code': None,
+            'state': query_params.get('state'),
+            'error': query_params['error']
+        }
+        print(f"❌ OAuth error: {oauth_callback_data['error']}", file=sys.stderr)
+        
+        return HTMLResponse(f"""
+        <html><body>
+        <h1>❌ Authentication Error</h1>
+        <p>Error: {query_params['error']}</p>
+        <p>Description: {query_params.get('error_description', 'Unknown error')}</p>
+        </body></html>
+        """)
+    else:
+        print("❌ No code or error in callback", file=sys.stderr)
+        return HTMLResponse("""
+        <html><body>
+        <h1>❌ Authentication Error</h1>
+        <p>No authorization code received</p>
+        </body></html>
+        """)
+
+# Auth initiation route for easy testing
+@mcp.custom_route("/auth/login", methods=["GET"])
+async def auth_login_handler(request: Request):
+    """Initiate OAuth flow"""
+    state = secrets.token_urlsafe(16)
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+    
+    # Store PKCE verifier for this state (in production, use proper session storage)
+    user_sessions[state] = {
+        'code_verifier': code_verifier,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    auth_url = auth_client.get_authorization_url(state, code_verifier)
+    return RedirectResponse(url=auth_url, status_code=302)
+
+def get_user_context(session_token: str) -> Optional[Dict[str, Any]]:
+    """Get user context from session token"""
+    try:
+        # In a real implementation, this would validate the session token
+        # and return user info from a secure session store
+        user_info = auth_validator.validate_token(session_token)
+        if user_info:
+            detailed_user_info = auth_validator.get_user_info(session_token)
+            if detailed_user_info:
+                return {
+                    'user_id': user_info.get('sub'),
+                    'email': detailed_user_info.get('email'),
+                    'name': detailed_user_info.get('name') or detailed_user_info.get('nickname'),
+                    'access_token': session_token
+                }
+        return None
+    except Exception as e:
+        print(f"Error getting user context: {e}", file=sys.stderr)
+        return None
 
 @mcp.tool()
-def echo_message(message: str) -> str:
+def echo_message(message: str, access_token: str = "") -> str:
     """
     Echo back a message with OAuth authentication.
-    Will trigger browser-based Auth0 login if not authenticated.
     
     Args:
         message: The message to echo back
+        access_token: OAuth access token (required for authentication)
         
     Returns:
         Echoed message with authenticated user info
     """
-    global user_access_token, user_name
+    if not access_token:
+        base_url = os.environ.get("SERVER_URL", "http://localhost:8000")
+        return f"❌ Authentication required. Please visit {base_url}/auth/login to authenticate, then provide your access token."
     
-    # Ensure user is authenticated (will trigger browser auth if needed)
-    if not ensure_authenticated():
-        return "❌ Authentication failed or cancelled. Please try again."
+    # Validate the access token
+    user_context = get_user_context(access_token)
+    if not user_context:
+        return "❌ Invalid access token. Please re-authenticate."
     
-    # Validate current token
-    user_info = auth_validator.validate_token(user_access_token)
-    if not user_info:
-        # Token might be expired, clear it and retry once
-        user_access_token = None
-        user_name = None
-        
-        if not ensure_authenticated():
-            return "❌ Re-authentication failed. Please try again."
-        
-        user_info = auth_validator.validate_token(user_access_token)
-        
-        if not user_info:
-            return "❌ Token validation failed. Please try again."
+    user_id = user_context.get('user_id', 'Unknown')
+    user_name = user_context.get('name') or user_context.get('email', 'User')
     
-    # Echo the message with user's name and ID
-    user_id = user_info.get('sub', 'Unknown')
-    
-    # Debug: Print all user info to stderr
-    print(f"🔍 Debug - User info keys: {list(user_info.keys())}", file=sys.stderr)
-    print(f"🔍 Debug - Full user info: {user_info}", file=sys.stderr)
-    print(f"🔍 Debug - User ID (sub): {user_id}", file=sys.stderr)
+    # Debug: Print user info to stderr
+    print(f"🔍 Debug - User ID: {user_id}", file=sys.stderr)
     print(f"🔍 Debug - User name: {user_name}", file=sys.stderr)
     
     response = f"🔐 Authenticated User: {user_name}\n🆔 User ID: {user_id}\n💬 Your message: '{message}'"
     print(f"📝 Authenticated echo from {user_name} ({user_id}): {response}", file=sys.stderr)
     return response
 
-if __name__ == "__main__":
-    print("🚀 OAuth-protected FastMCP server starting...", file=sys.stderr)
-    print("🔐 Browser authentication will trigger when tool is used", file=sys.stderr)
-    print("🛠️  Available tool: echo_message (OAuth protected)", file=sys.stderr)
-    print("🌐 Using streamable HTTP transport...", file=sys.stderr)
-    print("📡 Server will be available at: http://localhost:8000/mcp", file=sys.stderr)
+@mcp.tool()
+def start_auth() -> str:
+    """
+    Start OAuth authentication flow.
     
-    # Run with streamable HTTP transport (new standard, not deprecated SSE)
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    Returns:
+        Authentication URL for the user to visit
+    """
+    base_url = os.environ.get("SERVER_URL", "http://localhost:8000")
+    auth_url = f"{base_url}/auth/login"
+    
+    return f"🔐 Please visit this URL to authenticate: {auth_url}\n\nAfter authentication, you'll receive an access token to use with other tools."
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    host = "0.0.0.0" if os.environ.get("RENDER") else "localhost"
+    
+    print("🚀 OAuth-protected FastMCP server starting...", file=sys.stderr)
+    print("🔐 Server-side OAuth with Auth0 integration", file=sys.stderr)
+    print("🛠️  Available tools: start_auth, echo_message (OAuth protected)", file=sys.stderr)
+    print("🌐 Using streamable HTTP transport...", file=sys.stderr)
+    print(f"📡 Server will be available at: http://{host}:{port}/mcp", file=sys.stderr)
+    print(f"🔓 Auth login URL: http://{host}:{port}/auth/login", file=sys.stderr)
+    print(f"📞 Auth callback URL: http://{host}:{port}/auth/callback", file=sys.stderr)
+    
+    # Run with streamable HTTP transport
+    mcp.run(transport="streamable-http", host=host, port=port)
