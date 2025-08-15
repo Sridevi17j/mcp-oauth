@@ -336,15 +336,20 @@ def start_auth() -> str:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    host = "0.0.0.0" if os.environ.get("RENDER") else "localhost"
     
     print("🚀 OAuth-protected FastMCP server starting...", file=sys.stderr)
     print("🔐 Server-side OAuth with Auth0 integration", file=sys.stderr)
     print("🛠️  Available tools: start_auth, echo_message (OAuth protected)", file=sys.stderr)
     print("🌐 Using streamable HTTP transport...", file=sys.stderr)
-    print(f"📡 Server will be available at: http://{host}:{port}/mcp", file=sys.stderr)
-    print(f"🔓 Auth login URL: http://{host}:{port}/auth/login", file=sys.stderr)
-    print(f"📞 Auth callback URL: http://{host}:{port}/auth/callback", file=sys.stderr)
+    print(f"📡 Server will be available at: http://0.0.0.0:{port}/mcp", file=sys.stderr)
+    print(f"🔓 Auth login URL: http://0.0.0.0:{port}/auth/login", file=sys.stderr)
+    print(f"📞 Auth callback URL: http://0.0.0.0:{port}/auth/callback", file=sys.stderr)
     
-    # Run with streamable HTTP transport
-    mcp.run(transport="streamable-http", host=host, port=port)
+    # For Render deployment, use uvicorn directly with FastMCP's HTTP app
+    if os.environ.get("RENDER"):
+        import uvicorn
+        app = mcp.http_app(transport="streamable-http")
+        uvicorn.run(app, host="0.0.0.0", port=port)
+    else:
+        # For local development, use FastMCP's run method
+        mcp.run(transport="streamable-http")
