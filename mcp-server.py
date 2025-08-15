@@ -15,6 +15,8 @@ import hashlib
 import secrets
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, parse_qs, urlparse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 from datetime import datetime
 from dotenv import load_dotenv
 #from mcp.server.fastmcp import FastMCP
@@ -32,15 +34,51 @@ else:
     print(f"Warning: env file not found at {env_file}", file=sys.stderr)
 
 # Initialize FastMCP server
-mcp = FastMCP("simple-oauth-server")
+mcp = FastMCP(name="simple-oauth-server")
 
 # Global auth state
 user_access_token = None
 user_name = None
 oauth_in_progress = False
-oauth_callback_data = None
 
-# Note: AuthCallbackHandler removed - now using FastMCP route instead
+class AuthCallbackHandler(BaseHTTPRequestHandler):
+    """HTTP handler for OAuth callback"""
+    
+    def do_GET(self):
+        # Parse the authorization code from callback
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
+        
+        if 'code' in query_params:
+            self.server.authorization_code = query_params['code'][0]
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'''
+            <html><body>
+            <h1>Authentication Successful!</h1>
+            <p>You can now close this window and return to Claude Desktop.</p>
+            <script>setTimeout(() => window.close(), 3000);</script>
+            </body></html>
+            ''')
+        elif 'error' in query_params:
+            self.server.error = query_params['error'][0]
+            self.send_response(400)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(f'''
+            <html><body>
+            <h1>Authentication Error</h1>
+            <p>Error: {query_params['error'][0]}</p>
+            </body></html>
+            '''.encode())
+        
+        # Signal the server to stop
+        Thread(target=self.server.shutdown).start()
+    
+    def log_message(self, format, *args):
+        # Suppress default logging to keep stdio clean
+        pass
 
 class Auth0Client:
     """Auth0 OAuth client with browser-based PKCE flow"""
@@ -49,7 +87,7 @@ class Auth0Client:
         self.domain = os.environ.get("AUTH0_DOMAIN")
         self.client_id = os.environ.get("AUTH0_CLIENT_ID") 
         self.audience = os.environ.get("AUTH0_AUDIENCE")
-        self.redirect_uri = os.environ.get("OAUTH_CALLBACK_URL", "http://localhost:8080/callback")
+        self.redirect_uri = "https://mcp-oauth.onrender.com/callback"
         
         if not all([self.domain, self.client_id, self.audience]):
             raise ValueError("Missing Auth0 configuration: AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE required")
@@ -94,37 +132,30 @@ class Auth0Client:
             
             print(f"🌐 Opening browser for authentication...", file=sys.stderr)
             
-            # Clear any previous callback data
-            global oauth_callback_data
-            oauth_callback_data = None
+            # Start local callback server
+            server = HTTPServer(('localhost', 8080), AuthCallbackHandler)
+            server.authorization_code = None
+            server.error = None
             
             # Open browser
             webbrowser.open(auth_url)
             
-            print("⏳ Waiting for authorization callback...", file=sys.stderr)
+            print("⏳ Waiting for authorization...", file=sys.stderr)
             
-            # Wait for callback with timeout
-            import time
-            timeout = 60  # 60 second timeout
-            start_time = time.time()
+            # Handle callback with timeout
+            server.timeout = 60  # 60 second timeout
+            server.handle_request()
             
-            while oauth_callback_data is None and (time.time() - start_time) < timeout:
-                time.sleep(0.5)  # Check every 0.5 seconds
-            
-            if oauth_callback_data is None:
-                print("❌ Timeout waiting for authorization", file=sys.stderr)
-                return None
-                
-            if oauth_callback_data.get('error'):
-                print(f"❌ Authentication failed: {oauth_callback_data['error']}", file=sys.stderr)
+            if hasattr(server, 'error') and server.error:
+                print(f"❌ Authentication failed: {server.error}", file=sys.stderr)
                 return None
             
-            if not oauth_callback_data.get('authorization_code'):
+            if not hasattr(server, 'authorization_code') or not server.authorization_code:
                 print("❌ No authorization code received", file=sys.stderr)
                 return None
             
             # Exchange code for token
-            return self.exchange_code_for_token(oauth_callback_data['authorization_code'], code_verifier)
+            return self.exchange_code_for_token(server.authorization_code, code_verifier)
             
         finally:
             oauth_in_progress = False
@@ -322,60 +353,6 @@ def echo_message(message: str) -> str:
     response = f"🔐 Authenticated User: {user_name}\n🆔 User ID: {user_id}\n💬 Your message: '{message}'"
     print(f"📝 Authenticated echo from {user_name} ({user_id}): {response}", file=sys.stderr)
     return response
-
-@mcp.route("/callback")
-def oauth_callback(request):
-    """Handle OAuth callback from Auth0"""
-    global oauth_callback_data
-    
-    # Parse query parameters from the request
-    query_string = request.get('query', '')
-    from urllib.parse import parse_qs
-    
-    if hasattr(request, 'url'):
-        # Extract query from full URL
-        from urllib.parse import urlparse, parse_qs
-        parsed_url = urlparse(request.url)
-        query_params = parse_qs(parsed_url.query)
-    else:
-        # Try to get query params from request directly
-        query_params = parse_qs(query_string)
-    
-    print(f"🔍 OAuth callback received: {query_params}", file=sys.stderr)
-    
-    if 'code' in query_params:
-        oauth_callback_data = {
-            'authorization_code': query_params['code'][0],
-            'error': None
-        }
-        print(f"✅ Authorization code received: {oauth_callback_data['authorization_code'][:10]}...", file=sys.stderr)
-        return """
-        <html><body>
-        <h1>Authentication Successful!</h1>
-        <p>You can now close this window and return to Claude Desktop.</p>
-        <script>setTimeout(() => window.close(), 3000);</script>
-        </body></html>
-        """
-    elif 'error' in query_params:
-        oauth_callback_data = {
-            'authorization_code': None,
-            'error': query_params['error'][0]
-        }
-        print(f"❌ OAuth error: {oauth_callback_data['error']}", file=sys.stderr)
-        return f"""
-        <html><body>
-        <h1>Authentication Error</h1>
-        <p>Error: {query_params['error'][0]}</p>
-        </body></html>
-        """
-    else:
-        print("❌ No code or error in callback", file=sys.stderr)
-        return """
-        <html><body>
-        <h1>Authentication Error</h1>
-        <p>No authorization code received</p>
-        </body></html>
-        """
 
 if __name__ == "__main__":
     print("🚀 OAuth-protected FastMCP server starting...", file=sys.stderr)
