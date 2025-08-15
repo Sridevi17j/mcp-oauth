@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlencode, parse_qs, urlparse
 from datetime import datetime
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, HTMLResponse, RedirectResponse
 
@@ -345,6 +345,5 @@ if __name__ == "__main__":
     print(f"🔓 Auth login URL: http://0.0.0.0:{port}/auth/login", file=sys.stderr)
     print(f"📞 Auth callback URL: http://0.0.0.0:{port}/auth/callback", file=sys.stderr)
     
-    # Use FastMCP's run method with host and port as transport kwargs
-    # This is the CORRECT way according to FastMCP documentation
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+    # Use FastMCP's run method with explicit HTTP transport
+    mcp.run(transport="http", host="0.0.0.0", port=port)
