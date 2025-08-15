@@ -1,0 +1,10 @@
+mcp
+fastmcp
+anthropic
+python-dotenv
+requests
+beautifulsoup4
+pyjwt[crypto]
+authlib
+fastapi
+uvicorn
