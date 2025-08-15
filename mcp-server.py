@@ -360,4 +360,4 @@ if __name__ == "__main__":
     print("📡 Server will be available at: http://localhost:8000/mcp", file=sys.stderr)
     
     # Run with streamable HTTP transport (new standard, not deprecated SSE)
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    mcp.run(transport="streamable-http")
