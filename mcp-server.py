@@ -345,11 +345,6 @@ if __name__ == "__main__":
     print(f"🔓 Auth login URL: http://0.0.0.0:{port}/auth/login", file=sys.stderr)
     print(f"📞 Auth callback URL: http://0.0.0.0:{port}/auth/callback", file=sys.stderr)
     
-    # For Render deployment, use uvicorn directly with FastMCP's HTTP app
-    if os.environ.get("RENDER"):
-        import uvicorn
-        app = mcp.http_app(transport="streamable-http")
-        uvicorn.run(app, host="0.0.0.0", port=port)
-    else:
-        # For local development, use FastMCP's run method
-        mcp.run(transport="streamable-http")
+    # Use FastMCP's run method with host and port as transport kwargs
+    # This is the CORRECT way according to FastMCP documentation
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
